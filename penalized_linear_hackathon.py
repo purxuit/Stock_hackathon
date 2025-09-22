@@ -7,95 +7,69 @@ from sklearn.linear_model import LinearRegression, Lasso, Ridge, ElasticNet
 from sklearn.metrics import mean_squared_error
 
 if __name__ == "__main__":
-    # for timing purpose
+    # Display current time (for timing purposes)
     print(datetime.datetime.now())
 
-    # turn off pandas Setting with Copy Warning
-    pd.set_option("mode.chained_assignment", None)
-
-    # set working directory
+    # Set working directory (adjust as necessary)
     work_dir = "Your working directory"
 
-    # read sample data
-    file_path = os.path.join(
-        work_dir, "sample_data.csv"
-    )  # replace with the correct file name
-    raw = pd.read_csv(
-        file_path, parse_dates=["ret_eom"], low_memory=False
-    )  # the date is the first day of the return month (t+1)
+    # Read the sample data
+    file_path = os.path.join(work_dir, "sample_data.csv")
+    raw = pd.read_csv(file_path, parse_dates=["ret_eom"], low_memory=False)
 
-    # read list of predictors for stocks
-    file_path = os.path.join(
-        work_dir, "factor_char_list.csv"
-    )  # replace with the correct file name
+    # Read the list of stock variables (predictors)
+    file_path = os.path.join(work_dir, "factor_char_list.csv")
     stock_vars = list(pd.read_csv(file_path)["variable"].values)
 
-    # define the left hand side variable
+    # Define the return variable
     ret_var = "stock_ret"
-    new_set = raw[
-        raw[ret_var].notna()
-    ].copy()  # create a copy of the data and make sure the left hand side is not missing
+    new_set = raw[raw[ret_var].notna()].copy()  # Filter out missing returns
 
-    # transform each variable in each month to the same scale
+    # Rank-transform each stock variable monthly
     monthly = new_set.groupby("date")
     data = pd.DataFrame()
     for date, monthly_raw in monthly:
         group = monthly_raw.copy()
-        # rank transform each variable to [-1, 1]
         for var in stock_vars:
             var_median = group[var].median(skipna=True)
-            group[var] = group[var].fillna(
-                var_median
-            )  # fill missing values with the cross-sectional median of each month
-
+            group[var] = group[var].fillna(var_median)  # Fill missing values with median
             group[var] = group[var].rank(method="dense") - 1
             group_max = group[var].max()
             if group_max > 0:
                 group[var] = (group[var] / group_max) * 2 - 1
             else:
-                group[var] = 0  # in case of all missing values
-                print("Warning:", date, var, "set to zero.")
+                group[var] = 0  # Handle all missing values
+                print(f"Warning: {date} {var} set to zero.")
 
-        # add the adjusted values
-        data = data._append(
-            group, ignore_index=True
-        )  # append may not work with certain versions of pandas, use concat instead if needed
+        # Append the adjusted data
+        data = pd.concat([data, group], ignore_index=True)
 
-    # initialize the starting date, counter, and output data
-    starting = pd.to_datetime("20050101", format="%Y%m%d")
+    # Set initial training start date
+    starting = pd.to_datetime("2005-01-01")
     counter = 0
     pred_out = pd.DataFrame()
 
-    # estimation with expanding window
-    while (starting + pd.DateOffset(years=11 + counter)) <= pd.to_datetime(
-        "20260101", format="%Y%m%d"
-    ):
+    # Expanding window backtest loop
+    while (starting + pd.DateOffset(years=11 + counter)) <= pd.to_datetime("2026-01-01"):
         cutoff = [
             starting,
-            starting
-            + pd.DateOffset(
-                years=8 + counter
-            ),  # use 8 years and expanding as the training set
-            starting
-            + pd.DateOffset(
-                years=10 + counter
-            ),  # use the next 2 years as the validation set
-            starting + pd.DateOffset(years=11 + counter),
-        ]  # use the next year as the out-of-sample testing set
+            starting + pd.DateOffset(years=8 + counter),  # 8 years for training
+            starting + pd.DateOffset(years=10 + counter),  # 2 years for validation
+            starting + pd.DateOffset(years=11 + counter),  # 1 year for testing
+        ]
 
-        # cut the sample into training, validation, and testing sets
+        # Split the dataset into training, validation, and test sets
         train = data[(data["date"] >= cutoff[0]) & (data["date"] < cutoff[1])]
         validate = data[(data["date"] >= cutoff[1]) & (data["date"] < cutoff[2])]
         test = data[(data["date"] >= cutoff[2]) & (data["date"] < cutoff[3])]
 
-        # Optional: if your data has additional binary or categorical variables,
-        # you can further standardize them here
+        # Standardize the data
         scaler = StandardScaler().fit(train[stock_vars])
         train[stock_vars] = scaler.transform(train[stock_vars])
         validate[stock_vars] = scaler.transform(validate[stock_vars])
         test[stock_vars] = scaler.transform(test[stock_vars])
 
-        # get Xs and Ys
+        # Prepare training, validation, and test sets
         X_train = train[stock_vars].values
         Y_train = train[ret_var].values
         X_val = validate[stock_vars].values
@@ -103,57 +77,46 @@ if __name__ == "__main__":
         X_test = test[stock_vars].values
         Y_test = test[ret_var].values
 
-        # de-mean Y (because the regressions are fitted without an intercept)
-        # if you want to include an intercept (or bias in neural networks, etc), you can skip this step
+        # Demean the returns
         Y_mean = np.mean(Y_train)
         Y_train_dm = Y_train - Y_mean
 
-        # prepare output data
-        reg_pred = test[
-            ["year", "month", "ret_eom", "id", ret_var]
-        ]  # minimum identifications for each stock
-
-        # Linear Regression
-        # no validation is needed for OLS
+        # Linear regression prediction
         reg = LinearRegression(fit_intercept=False)
         reg.fit(X_train, Y_train_dm)
         x_pred = reg.predict(X_test) + Y_mean
+        reg_pred = test[["year", "month", "ret_eom", "id", ret_var]]
         reg_pred["ols"] = x_pred
 
-        # Lasso
-        lambdas = np.arange(
-            -4, 4.1, 0.1
-        )  # search for the best lambda in the range of 10^-4 to 10^4, range can be adjusted
+        # Lasso Regression
+        lambdas = np.arange(-4, 4.1, 0.1)
         val_mse = np.zeros(len(lambdas))
         for ind, i in enumerate(lambdas):
             reg = Lasso(alpha=(10**i), max_iter=1000000, fit_intercept=False)
             reg.fit(X_train, Y_train_dm)
             val_mse[ind] = mean_squared_error(Y_val, reg.predict(X_val) + Y_mean)
 
-        # select the best lambda based on the validation set
         best_lambda = lambdas[np.argmin(val_mse)]
         reg = Lasso(alpha=(10**best_lambda), max_iter=1000000, fit_intercept=False)
         reg.fit(X_train, Y_train_dm)
-        x_pred = reg.predict(X_test) + Y_mean  # predict the out-of-sample testing set
+        x_pred = reg.predict(X_test) + Y_mean
         reg_pred["lasso"] = x_pred
 
-        # Ridge
-        # same format as above
+        # Ridge Regression
         lambdas = np.arange(-1, 8.1, 0.1)
         val_mse = np.zeros(len(lambdas))
         for ind, i in enumerate(lambdas):
-            reg = Ridge(alpha=((10**i) * 0.5), fit_intercept=False)
+            reg = Ridge(alpha=(10**i * 0.5), fit_intercept=False)
             reg.fit(X_train, Y_train_dm)
             val_mse[ind] = mean_squared_error(Y_val, reg.predict(X_val) + Y_mean)
 
         best_lambda = lambdas[np.argmin(val_mse)]
-        reg = Ridge(alpha=((10**best_lambda) * 0.5), fit_intercept=False)
+        reg = Ridge(alpha=(10**best_lambda * 0.5), fit_intercept=False)
         reg.fit(X_train, Y_train_dm)
         x_pred = reg.predict(X_test) + Y_mean
         reg_pred["ridge"] = x_pred
 
-        # Elastic Net
-        # same format as above
+        # ElasticNet Regression
         lambdas = np.arange(-4, 4.1, 0.1)
         val_mse = np.zeros(len(lambdas))
         for ind, i in enumerate(lambdas):
@@ -167,23 +130,20 @@ if __name__ == "__main__":
         x_pred = reg.predict(X_test) + Y_mean
         reg_pred["en"] = x_pred
 
-        # add to the output data
-        pred_out = pred_out._append(reg_pred, ignore_index=True)
+        # Append predictions
+        pred_out = pd.concat([pred_out, reg_pred], ignore_index=True)
 
-        # go to the next year
+        # Move to the next year
         counter += 1
 
-    # output the predicted value to csv
-    out_path = os.path.join(work_dir, "output.csv")
-    print(out_path)
-    pred_out.to_csv(out_path, index=False)
+    # Output the predicted values
+    pred_out.to_csv("output.csv", index=False)
 
-    # print the OOS R2
+    # Print OOS R2
     yreal = pred_out[ret_var].values
     for model_name in ["ols", "lasso", "ridge", "en"]:
         ypred = pred_out[model_name].values
         r2 = 1 - np.sum(np.square((yreal - ypred))) / np.sum(np.square(yreal))
         print(model_name, r2)
 
-    # for timing purpose
     print(datetime.datetime.now())
