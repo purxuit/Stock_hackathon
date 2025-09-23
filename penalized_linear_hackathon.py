@@ -11,11 +11,25 @@ if __name__ == "__main__":
     print(datetime.datetime.now())
 
     # Set working directory (adjust as necessary)
-    work_dir = "Your working directory"
+    work_dir = "C:\\Users\\Naifu\\Desktop\\Hackathon"
 
     # Read the sample data
-    file_path = os.path.join(work_dir, "sample_data.csv")
-    raw = pd.read_csv(file_path, parse_dates=["ret_eom"], low_memory=False)
+    file_path = os.path.join(work_dir, "ret_sample.csv")
+    chunk_iter = pd.read_csv(file_path, 
+                         parse_dates=["ret_eom"], 
+                         low_memory=False, 
+                         chunksize=500000, # adjust chunksize
+                         nrows=2_000_000) # only look at first 2M rows
+
+    # Example: just look at first chunk
+    first_chunk = next(chunk_iter)
+
+    # Or concatenate processed chunks
+    data_list = []
+    for chunk in chunk_iter:
+        # do some preprocessing here (filtering, dropping cols)
+        data_list.append(chunk)
+    raw = pd.concat(data_list, ignore_index=True)
 
     # Read the list of stock variables (predictors)
     file_path = os.path.join(work_dir, "factor_char_list.csv")
