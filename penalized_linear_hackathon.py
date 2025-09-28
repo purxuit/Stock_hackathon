@@ -1,163 +1,160 @@
 import datetime
-import pandas as pd
-import numpy as np
 import os
+import numpy as np
+import polars as pl
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression, Lasso, Ridge, ElasticNet
 from sklearn.metrics import mean_squared_error
 
-if __name__ == "__main__":
-    # Display current time (for timing purposes)
-    print(datetime.datetime.now())
+print(datetime.datetime.now())
 
-    # Set working directory (adjust as necessary)
-    work_dir = "C:\\Users\\Naifu\\Desktop\\Hackathon"
+# === Settings ===
+work_dir = "C:\\Users\\Naifu\\Desktop\\Hackathon"
+ret_var = "stock_ret"
+start_date = pl.date(2005, 1, 1)
+end_date = pl.date(2026, 1, 1)
 
-    # Read the sample data
-    file_path = os.path.join(work_dir, "ret_sample.csv")
-    chunk_iter = pd.read_csv(file_path, 
-                         parse_dates=["ret_eom"], 
-                         low_memory=False, 
-                         chunksize=500000, # adjust chunksize
-                         nrows=2_000_000) # only look at first 2M rows
+# === Load predictors list ===
+file_path = os.path.join(work_dir, "factor_char_list.csv")
+stock_vars = pl.read_csv(file_path)["variable"].to_list()
 
-    # Example: just look at first chunk
-    first_chunk = next(chunk_iter)
+# === Load raw data with Polars ===
+file_path = os.path.join(work_dir, "ret_sample.csv")
+raw = pl.read_csv(
+    file_path,
+    try_parse_dates=True,
+    low_memory=True,
+    rechunk=True
+)
+schema_overrides = {var: pl.Float32 for var in stock_vars}
+# treat identifiers as Utf8 (string) so they won’t cause dtype mismatches
+schema_overrides.update({"gvkey": pl.Utf8, "iid": pl.Utf8, "id": pl.Utf8})
 
-    # Or concatenate processed chunks
-    data_list = []
-    for chunk in chunk_iter:
-        # do some preprocessing here (filtering, dropping cols)
-        data_list.append(chunk)
-    raw = pd.concat(data_list, ignore_index=True)
+# Add predictor date column (from char_date)
+raw = raw.with_columns([
+    pl.col("char_date").cast(pl.Utf8).str.strptime(pl.Date, "%Y%m%d").alias("date")
+])
 
-    # Read the list of stock variables (predictors)
-    file_path = os.path.join(work_dir, "factor_char_list.csv")
-    stock_vars = list(pd.read_csv(file_path)["variable"].values)
+# Filter out rows with missing returns
+raw = raw.filter(pl.col(ret_var).is_not_null())
 
-    # Define the return variable
-    ret_var = "stock_ret"
-    new_set = raw[raw[ret_var].notna()].copy()  # Filter out missing returns
+# === Cross-sectional rank transform per month ===
+def rank_to_unit(df: pl.DataFrame) -> pl.DataFrame:
+    out = df
+    for var in stock_vars:
+        median = out[var].median()
+        out = out.with_columns(
+            pl.when(pl.col(var).is_null()).then(median).otherwise(pl.col(var)).alias(var)
+        )
+        out = out.with_columns((pl.col(var).rank("dense") - 1).alias(var))
+        
+        maxv = out[var].max()
+        if maxv is None or maxv == 0:
+            out = out.with_columns(pl.lit(0).alias(var))
+        else:
+            out = out.with_columns(((pl.col(var) / maxv) * 2 - 1).alias(var))
+    return out
 
-    # Rank-transform each stock variable monthly
-    monthly = new_set.groupby("date")
-    data = pd.DataFrame()
-    for date, monthly_raw in monthly:
-        group = monthly_raw.copy()
-        for var in stock_vars:
-            var_median = group[var].median(skipna=True)
-            group[var] = group[var].fillna(var_median)  # Fill missing values with median
-            group[var] = group[var].rank(method="dense") - 1
-            group_max = group[var].max()
-            if group_max > 0:
-                group[var] = (group[var] / group_max) * 2 - 1
-            else:
-                group[var] = 0  # Handle all missing values
-                print(f"Warning: {date} {var} set to zero.")
 
-        # Append the adjusted data
-        data = pd.concat([data, group], ignore_index=True)
+data = raw.group_by("date", maintain_order=True).map_groups(rank_to_unit)
 
-    # Set initial training start date
-    starting = pd.to_datetime("2005-01-01")
-    counter = 0
-    pred_out = pd.DataFrame()
+# === Expanding window backtest ===
+pred_out = []
 
-    # Expanding window backtest loop
-    while (starting + pd.DateOffset(years=11 + counter)) <= pd.to_datetime("2026-01-01"):
-        cutoff = [
-            starting,
-            starting + pd.DateOffset(years=8 + counter),  # 8 years for training
-            starting + pd.DateOffset(years=10 + counter),  # 2 years for validation
-            starting + pd.DateOffset(years=11 + counter),  # 1 year for testing
-        ]
+counter = 0
+while (start_date + datetime.timedelta(days=365*11 + counter*365)) <= end_date:
+    cutoff = [
+        start_date,
+        start_date + datetime.timedelta(days=365*(8 + counter)),   # training end
+        start_date + datetime.timedelta(days=365*(10 + counter)),  # validation end
+        start_date + datetime.timedelta(days=365*(11 + counter))   # test end
+    ]
 
-        # Split the dataset into training, validation, and test sets
-        train = data[(data["date"] >= cutoff[0]) & (data["date"] < cutoff[1])]
-        validate = data[(data["date"] >= cutoff[1]) & (data["date"] < cutoff[2])]
-        test = data[(data["date"] >= cutoff[2]) & (data["date"] < cutoff[3])]
+    # Slice data (still Polars)
+    train = data.filter((pl.col("date") >= cutoff[0]) & (pl.col("date") < cutoff[1]))
+    validate = data.filter((pl.col("date") >= cutoff[1]) & (pl.col("date") < cutoff[2]))
+    test = data.filter((pl.col("date") >= cutoff[2]) & (pl.col("date") < cutoff[3]))
 
-        # Standardize the data
-        scaler = StandardScaler().fit(train[stock_vars])
-        train[stock_vars] = scaler.transform(train[stock_vars])
-        validate[stock_vars] = scaler.transform(validate[stock_vars])
-        test[stock_vars] = scaler.transform(test[stock_vars])
-
-        # Prepare training, validation, and test sets
-        X_train = train[stock_vars].values
-        Y_train = train[ret_var].values
-        X_val = validate[stock_vars].values
-        Y_val = validate[ret_var].values
-        X_test = test[stock_vars].values
-        Y_test = test[ret_var].values
-
-        # Demean the returns
-        Y_mean = np.mean(Y_train)
-        Y_train_dm = Y_train - Y_mean
-
-        # Linear regression prediction
-        reg = LinearRegression(fit_intercept=False)
-        reg.fit(X_train, Y_train_dm)
-        x_pred = reg.predict(X_test) + Y_mean
-        reg_pred = test[["year", "month", "ret_eom", "id", ret_var]]
-        reg_pred["ols"] = x_pred
-
-        # Lasso Regression
-        lambdas = np.arange(-4, 4.1, 0.1)
-        val_mse = np.zeros(len(lambdas))
-        for ind, i in enumerate(lambdas):
-            reg = Lasso(alpha=(10**i), max_iter=1000000, fit_intercept=False)
-            reg.fit(X_train, Y_train_dm)
-            val_mse[ind] = mean_squared_error(Y_val, reg.predict(X_val) + Y_mean)
-
-        best_lambda = lambdas[np.argmin(val_mse)]
-        reg = Lasso(alpha=(10**best_lambda), max_iter=1000000, fit_intercept=False)
-        reg.fit(X_train, Y_train_dm)
-        x_pred = reg.predict(X_test) + Y_mean
-        reg_pred["lasso"] = x_pred
-
-        # Ridge Regression
-        lambdas = np.arange(-1, 8.1, 0.1)
-        val_mse = np.zeros(len(lambdas))
-        for ind, i in enumerate(lambdas):
-            reg = Ridge(alpha=(10**i * 0.5), fit_intercept=False)
-            reg.fit(X_train, Y_train_dm)
-            val_mse[ind] = mean_squared_error(Y_val, reg.predict(X_val) + Y_mean)
-
-        best_lambda = lambdas[np.argmin(val_mse)]
-        reg = Ridge(alpha=(10**best_lambda * 0.5), fit_intercept=False)
-        reg.fit(X_train, Y_train_dm)
-        x_pred = reg.predict(X_test) + Y_mean
-        reg_pred["ridge"] = x_pred
-
-        # ElasticNet Regression
-        lambdas = np.arange(-4, 4.1, 0.1)
-        val_mse = np.zeros(len(lambdas))
-        for ind, i in enumerate(lambdas):
-            reg = ElasticNet(alpha=(10**i), max_iter=1000000, fit_intercept=False)
-            reg.fit(X_train, Y_train_dm)
-            val_mse[ind] = mean_squared_error(Y_val, reg.predict(X_val) + Y_mean)
-
-        best_lambda = lambdas[np.argmin(val_mse)]
-        reg = ElasticNet(alpha=(10**best_lambda), max_iter=1000000, fit_intercept=False)
-        reg.fit(X_train, Y_train_dm)
-        x_pred = reg.predict(X_test) + Y_mean
-        reg_pred["en"] = x_pred
-
-        # Append predictions
-        pred_out = pd.concat([pred_out, reg_pred], ignore_index=True)
-
-        # Move to the next year
+    if train.height == 0 or validate.height == 0 or test.height == 0:
+        print("Empty window:", cutoff)
         counter += 1
+        continue
 
-    # Output the predicted values
-    pred_out.to_csv("output.csv", index=False)
+    # Convert predictors/target to NumPy
+    X_train = train.select(stock_vars).to_numpy()
+    Y_train = train[ret_var].to_numpy()
+    X_val = validate.select(stock_vars).to_numpy()
+    Y_val = validate[ret_var].to_numpy()
+    X_test = test.select(stock_vars).to_numpy()
+    Y_test = test[ret_var].to_numpy()
 
-    # Print OOS R2
-    yreal = pred_out[ret_var].values
-    for model_name in ["ols", "lasso", "ridge", "en"]:
-        ypred = pred_out[model_name].values
-        r2 = 1 - np.sum(np.square((yreal - ypred))) / np.sum(np.square(yreal))
-        print(model_name, r2)
+    # Standardize features
+    scaler = StandardScaler().fit(X_train)
+    X_train = scaler.transform(X_train)
+    X_val = scaler.transform(X_val)
+    X_test = scaler.transform(X_test)
 
-    print(datetime.datetime.now())
+    # Demean returns
+    Y_mean = Y_train.mean()
+    Y_train_dm = Y_train - Y_mean
+
+    # === Models ===
+    reg_pred = test.select(["year", "month", "ret_eom", "id", ret_var]).to_pandas()
+
+    # Linear Regression
+    reg = LinearRegression(fit_intercept=False)
+    reg.fit(X_train, Y_train_dm)
+    reg_pred["ols"] = reg.predict(X_test) + Y_mean
+
+    # Lasso
+    lambdas = np.arange(-4, 4.1, 0.1)
+    val_mse = []
+    for i in lambdas:
+        model = Lasso(alpha=10**i, max_iter=1_000_000, fit_intercept=False)
+        model.fit(X_train, Y_train_dm)
+        val_mse.append(mean_squared_error(Y_val, model.predict(X_val) + Y_mean))
+    best_lambda = lambdas[np.argmin(val_mse)]
+    reg = Lasso(alpha=10**best_lambda, max_iter=1_000_000, fit_intercept=False)
+    reg.fit(X_train, Y_train_dm)
+    reg_pred["lasso"] = reg.predict(X_test) + Y_mean
+
+    # Ridge
+    lambdas = np.arange(-1, 8.1, 0.1)
+    val_mse = []
+    for i in lambdas:
+        model = Ridge(alpha=(10**i)*0.5, fit_intercept=False)
+        model.fit(X_train, Y_train_dm)
+        val_mse.append(mean_squared_error(Y_val, model.predict(X_val) + Y_mean))
+    best_lambda = lambdas[np.argmin(val_mse)]
+    reg = Ridge(alpha=(10**best_lambda)*0.5, fit_intercept=False)
+    reg.fit(X_train, Y_train_dm)
+    reg_pred["ridge"] = reg.predict(X_test) + Y_mean
+
+    # ElasticNet
+    lambdas = np.arange(-4, 4.1, 0.1)
+    val_mse = []
+    for i in lambdas:
+        model = ElasticNet(alpha=10**i, max_iter=1_000_000, fit_intercept=False)
+        model.fit(X_train, Y_train_dm)
+        val_mse.append(mean_squared_error(Y_val, model.predict(X_val) + Y_mean))
+    best_lambda = lambdas[np.argmin(val_mse)]
+    reg = ElasticNet(alpha=10**best_lambda, max_iter=1_000_000, fit_intercept=False)
+    reg.fit(X_train, Y_train_dm)
+    reg_pred["en"] = reg.predict(X_test) + Y_mean
+
+    # Append results
+    pred_out.append(reg_pred)
+    counter += 1
+
+# === Collect results ===
+pred_out = pl.from_pandas(np.concatenate([df.to_numpy() for df in pred_out]))
+pred_out.write_csv(os.path.join(work_dir, "output.csv"))
+
+# === Evaluate R2 ===
+yreal = pred_out[ret_var].to_numpy()
+for model_name in ["ols", "lasso", "ridge", "en"]:
+    ypred = pred_out[model_name].to_numpy()
+    r2 = 1 - np.sum((yreal - ypred)**2) / np.sum(yreal**2)
+    print(model_name, r2)
+
+print(datetime.datetime.now())
