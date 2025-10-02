@@ -5,13 +5,15 @@ from pandas.tseries.offsets import MonthBegin
 
 # Read predicted values (adjust path to your predicted values)
 pred_path = "output.csv"
-pred = pd.read_csv(pred_path, parse_dates=["date"])
-
+pred = pd.read_csv(pred_path, parse_dates=[["year","month"]])
+pred["year"] = pred["year_month"].dt.year
+pred["month"] = pred["year_month"].dt.month
 # Select the model you want to evaluate
 model = "ridge"
 
 # Rank stocks into deciles based on predicted returns
 predicted = pred.groupby(["year", "month"])[model]
+
 pred["rank"] = np.floor(
     predicted.transform(lambda s: s.rank()) * 10 / predicted.transform(lambda s: len(s) + 1)
 )
@@ -32,8 +34,9 @@ sharpe = monthly_port["port_11"].mean() / monthly_port["port_11"].std() * np.sqr
 print("Sharpe Ratio:", sharpe)
 
 # Calculate the CAPM Alpha for the long-short portfolio
-mkt_path = "mkt_ind.csv"
+mkt_path = "..\\mkt_ind.csv"
 mkt = pd.read_csv(mkt_path)
+mkt["mkt_rf"] = mkt["ret"] - mkt["rf"]
 monthly_port = monthly_port.merge(mkt, how="inner", on=["year", "month"])
 
 # Newey-West regression for heteroskedasticity and autocorrelation robust standard errors

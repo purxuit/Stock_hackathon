@@ -8,7 +8,7 @@ from sklearn.metrics import mean_squared_error
 print(datetime.datetime.now())
 
 # === Settings ===
-work_dir = r"C:\Users\Naifu\Desktop\Hackathon"
+work_dir = r"C:\Users\Naifu\Desktop\Finance Hackathon 2025"
 ret_var = "stock_ret"
 # Use *python* date objects, not polars expressions, for cutoffs
 start_date = datetime.date(2005, 1, 1)
@@ -19,7 +19,7 @@ fac_path = os.path.join(work_dir, "factor_char_list.csv")
 stock_vars = pl.read_csv(fac_path)["variable"].to_list()
 
 # === Load raw data with Polars (set schema!) ===
-csv_path = os.path.join(work_dir, "ret_sample.csv")
+csv_path = os.path.join(work_dir, "ret_sample_update.csv")
 raw = pl.read_csv(
     csv_path,
     try_parse_dates=True,
