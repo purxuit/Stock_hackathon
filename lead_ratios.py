@@ -1,31 +1,72 @@
 """
-This code takes a 4-month lead of accounting ratios and adds them back to the original sample.
-These lead ratios can be used as predictors for the out-of-sample testing.
+Shift accounting ratios forward by 4 calendar months and merge them
+back into the main dataset for predictive modeling (lead fundamentals).
 """
 
-import pandas as pd
+import polars as pl
 
-# Read the original sample dataset
-data = pd.read_csv(
-    "ret_sample.csv",
-    parse_dates=["date", "ret_eom", "char_date", "char_eom"],
-    low_memory=False,
+# --- File paths ---
+#replace with ur own paths, this name is different because they apparently updated the data but using just ret_sample.csv should be fine
+data_path = r"../ret_sample_update.csv"
+ratio_path = r"../acc_ratios.csv"
+output_path = r"../final_data.csv"
+
+# --- Load main dataset ---
+data = pl.read_csv(
+    data_path,
+    try_parse_dates=True,
+    low_memory=True,
+    rechunk=True,
 )
 
-# Read the list of accounting ratios
-ratio_list = pd.read_csv("acc_ratios.csv")
-ratio_list = ratio_list["Variable"].tolist()
+# Parse known date columns if needed
+for col in ["date", "ret_eom", "char_date", "char_eom"]:
+    if col in data.columns and data[col].dtype == pl.Utf8:
+        data = data.with_columns(pl.col(col).str.strptime(pl.Date, "%Y-%m-%d", strict=False))
 
-# Keep the necessary identifiers and ratios
-ratios = data[["id", "char_eom"] + ratio_list]
+# --- Load accounting ratio variable list ---
+ratio_list = pl.read_csv(ratio_path)["Variable"].to_list()
 
-# Move the ratios 4 months ahead for predictive modeling
-ratios["char_eom"] = ratios["char_eom"] + pd.DateOffset(months=4)
-ratios = ratios.rename(columns={col: col + "_lead4" for col in ratio_list})
-ratios = ratios.rename(columns={"char_eom": "ret_eom"})  # Align with the correct date for merging
+# --- Keep only identifiers and ratios ---
+ratio_cols = ["id", "char_eom"] + ratio_list
+ratios = data.select([c for c in ratio_cols if c in data.columns])
 
-# Merge the lead ratios with the original data
-final_data = pd.merge(data, ratios, on=["id", "ret_eom"], how="left")
+# --- Ensure char_eom is parsed as a proper Date first ---
+# If it's an integer like 20210331, convert to string then to Date
+if ratios["char_eom"].dtype == pl.Int64:
+    ratios = ratios.with_columns(
+        pl.col("char_eom")
+        .cast(pl.Utf8)
+        .str.strptime(pl.Date, "%Y%m%d", strict=False)
+    )
 
-# Save the final dataset
-final_data.to_csv("final_data.csv", index=False)
+# Now safely shift by 4 calendar months
+ratios = ratios.with_columns(
+    pl.col("char_eom").dt.offset_by("4mo").alias("ret_eom")
+)
+
+
+# --- Rename ratio columns to indicate lead4 ---
+lead_cols = {col: f"{col}_lead4" for col in ratio_list}
+ratios = ratios.rename(lead_cols)
+
+# --- Keep relevant columns for merging ---
+ratios = ratios.select(["id", "ret_eom"] + list(lead_cols.values()))
+
+# --- Ensure both join keys ('ret_eom') are Date type ---
+if data["ret_eom"].dtype == pl.Int64:
+    data = data.with_columns(
+        pl.col("ret_eom").cast(pl.Utf8).str.strptime(pl.Date, "%Y%m%d", strict=False)
+    )
+
+if ratios["ret_eom"].dtype != data["ret_eom"].dtype:
+    ratios = ratios.with_columns(pl.col("ret_eom").cast(data["ret_eom"].dtype))
+
+# --- Merge back with main data (left join ensures no loss of returns) ---
+final_data = data.join(ratios, on=["id", "ret_eom"], how="left")
+
+# --- Save output ---
+final_data.write_csv(output_path)
+
+print(f"✅ Saved merged dataset with 4-month lead ratios → {output_path}")
+print("Final dataset shape:", final_data.shape)
