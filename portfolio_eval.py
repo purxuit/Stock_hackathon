@@ -3,8 +3,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import statsmodels.api as sm
 
-pred = pd.read_csv("../output.csv")
-model = "en"
+pred = pd.read_csv("./output.csv")
+model = "xgb"
 
 # ensure true returns
 if "ret_next" in pred.columns:
@@ -49,7 +49,7 @@ sharpe = r.mean()/r.std()*np.sqrt(12)
 print(f"📈 Sharpe ratio (annualized): {sharpe:.3f}")
 
 # CAPM
-mkt = pd.read_csv("../mkt_ind.csv")  # must have year, month, ret, rf
+mkt = pd.read_csv("./mkt_ind.csv")  # must have year, month, ret, rf
 mkt["mkt_rf"] = mkt["ret"] - mkt["rf"]
 df = monthly_port.merge(mkt, on=["year","month"], how="inner")
 
@@ -106,3 +106,8 @@ print("\nTop 10 LONGS:")
 print(latest["long_ids"][:10])
 print("\nTop 10 SHORTS:")
 print(latest["short_ids"][:10])
+
+print("\nAll 100 LONGS:")
+print(latest["long_ids"])
+print("\nAll 100 SHORTS:")
+print(latest["short_ids"])

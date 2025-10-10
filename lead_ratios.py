@@ -7,9 +7,9 @@ import polars as pl
 
 # --- File paths ---
 #replace with ur own paths, this name is different because they apparently updated the data but using just ret_sample.csv should be fine
-data_path = r"../ret_sample_update.csv"
-ratio_path = r"../acc_ratios.csv"
-output_path = r"../final_data.csv"
+data_path = r"./ret_sample_update.csv"
+ratio_path = r"./acc_ratios.csv"
+output_path = r"./final_data.csv"
 
 # --- Load main dataset ---
 data = pl.read_csv(

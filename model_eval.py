@@ -4,10 +4,8 @@ import statsmodels.api as sm
 import matplotlib.pyplot as plt
 import pandas as pd
 
-
-
 # === 1. Load predictions ===
-pred = pd.read_csv("../output.csv")
+pred = pd.read_csv("./output.csv")
 
 # Combine year/month if needed
 if "year_month" not in pred.columns:
@@ -30,7 +28,7 @@ if "stock_ret" not in pred.columns:
         raise KeyError("Need 'stock_ret' or 'ret_next' column for real evaluation.")
 
 # === 2. Choose model ===
-model = "en"  # or "ols", "ridge", "lasso", "xgb"
+model = "xgb"  # or "ols", "ridge", "lasso", "xgb"
 print(f"Analyzing model: {model}")
 
 # === 3. Rank stocks into deciles (safe for small groups) ===
@@ -57,7 +55,7 @@ sharpe = longshort.mean() / longshort.std() * np.sqrt(12)
 print(f"Sharpe ratio (annualized): {sharpe:.3f}")
 
 # === 6. Load market data ===
-mkt = pd.read_csv("../mkt_ind.csv")  # columns: year, month, ret, rf
+mkt = pd.read_csv("./mkt_ind.csv")  # columns: year, month, ret, rf
 if not all(col in mkt.columns for col in ["year", "month", "ret", "rf"]):
     raise KeyError("Market data must include 'year', 'month', 'ret', and 'rf' columns.")
 
